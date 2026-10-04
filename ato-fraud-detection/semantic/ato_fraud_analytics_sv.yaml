@@ -1,0 +1,647 @@
+name: ATO_FRAUD_ANALYTICS_SV
+description: "Governed policy-aware semantic view over Account Takeover (ATO) fraud detection data, scored login events, customer accounts, devices, threat intelligence, and enforceable policy rules."
+
+tables:
+  # 1. Central Scored Logins Fact Table
+  - name: login_events
+    description: "Real-time scored authentication events containing unified risk scores (0-1000), three-tier decisions (SAFE/STEP-UP/BLOCK), velocity signals, and ground-truth fraud labels."
+    base_table:
+      database: ATO_FRAUD_DB
+      schema: SCORING
+      table: DT_SCORED_LOGINS
+    primary_key:
+      columns: [event_id]
+
+    dimensions:
+      - name: auth_method
+        synonyms: ["login method", "authentication type", "auth channel"]
+        description: "Authentication mechanism used (password, TOTP, SMS_OTP, FIDO2, SSO)."
+        expr: auth_method
+        data_type: VARCHAR
+
+      - name: country_code
+        synonyms: ["login country", "geography", "country", "location"]
+        description: "Two-letter country code where the login attempt originated."
+        expr: country_code
+        data_type: VARCHAR
+
+      - name: is_vpn
+        synonyms: ["VPN flag", "VPN connection", "using VPN"]
+        description: "Boolean flag indicating whether the login originated from a known VPN."
+        expr: is_vpn
+        data_type: BOOLEAN
+
+      - name: is_tor
+        synonyms: ["Tor flag", "Tor exit node", "darknet connection"]
+        description: "Boolean flag indicating whether the login originated from a Tor exit node."
+        expr: is_tor
+        data_type: BOOLEAN
+
+      - name: is_proxy
+        synonyms: ["proxy flag", "proxy connection"]
+        description: "Boolean flag indicating whether the login originated from a proxy server."
+        expr: is_proxy
+        data_type: BOOLEAN
+
+      - name: login_success
+        synonyms: ["successful login", "login result", "auth success"]
+        description: "Boolean flag indicating whether the authentication attempt succeeded."
+        expr: login_success
+        data_type: BOOLEAN
+
+      - name: failure_reason
+        synonyms: ["failure cause", "why login failed", "error reason"]
+        description: "Reason for authentication failure (wrong_password, expired_token, mfa_failed, locked)."
+        expr: failure_reason
+        data_type: VARCHAR
+
+      - name: is_fraud
+        synonyms: ["ground truth fraud", "actual fraud", "is compromise", "fraud label"]
+        description: "Ground truth boolean label: TRUE if event was part of an ATO attack."
+        expr: is_fraud
+        data_type: BOOLEAN
+
+      - name: fraud_scenario
+        synonyms: ["attack type", "ATO scenario", "threat vector", "fraud category"]
+        description: "Specific ATO attack scenario (credential_stuffing, impossible_travel, device_spoofing, brute_force, session_replay, new_device_recovery_abuse, sim_swap, rat_assisted, dormant_reactivation, bot_automation)."
+        expr: fraud_scenario
+        data_type: VARCHAR
+        is_enum: true
+
+      - name: risk_tier
+        synonyms: ["decision", "outcome tier", "action tier", "decision outcome"]
+        description: "Automated three-tier decision: SAFE (score < 350), STEP-UP (score 350-749), BLOCK (score >= 750)."
+        expr: risk_tier
+        data_type: VARCHAR
+        is_enum: true
+
+      - name: primary_risk_factor
+        synonyms: ["risk reason", "root cause", "flag reason", "trigger reason"]
+        description: "Primary explanatory reason why the login was flagged or scored high."
+        expr: primary_risk_factor
+        data_type: VARCHAR
+
+    time_dimensions:
+      - name: login_timestamp
+        synonyms: ["login time", "event time", "attempt date", "login date"]
+        description: "Timestamp when the login attempt occurred in UTC."
+        expr: event_ts
+        data_type: TIMESTAMP_NTZ
+
+    facts:
+      - name: risk_score
+        synonyms: ["unified risk score", "ATO score", "fraud score", "ensemble score"]
+        description: "Unified composite risk score ranging from 0 (safest) to 1000 (highest risk)."
+        expr: risk_score
+        data_type: INT
+
+      - name: geo_velocity_kmh
+        synonyms: ["travel speed", "impossible travel speed", "geo speed"]
+        description: "Physical speed in km/h required to travel between consecutive logins."
+        expr: geo_velocity_kmh
+        data_type: FLOAT
+
+      - name: failed_login_count_1h
+        synonyms: ["recent failed logins", "failed attempt count", "login failures 1h"]
+        description: "Count of failed login attempts for this customer in the preceding hour."
+        expr: failed_login_count_1h
+        data_type: INT
+
+    metrics:
+      - name: total_login_attempts
+        synonyms: ["login volume", "attempt count", "total logins", "number of logins"]
+        description: "Total count of login events."
+        expr: COUNT(event_id)
+
+      - name: blocked_login_count
+        synonyms: ["blocked logins", "denied logins", "block decisions", "logins blocked"]
+        description: "Count of login attempts where the automated decision was BLOCK (risk_score >= 750)."
+        expr: COUNT_IF(risk_tier = 'BLOCK')
+
+      - name: stepup_challenge_count
+        synonyms: ["step up challenges", "MFA challenges", "challenged logins"]
+        description: "Count of login attempts requiring adaptive STEP-UP authentication."
+        expr: COUNT_IF(risk_tier = 'STEP-UP')
+
+      - name: safe_login_count
+        synonyms: ["safe logins", "frictionless logins", "allowed logins"]
+        description: "Count of login attempts permitted without friction (SAFE tier)."
+        expr: COUNT_IF(risk_tier = 'SAFE')
+
+      - name: avg_risk_score
+        synonyms: ["mean risk score", "average fraud score", "average score"]
+        description: "Average unified risk score across evaluated login events."
+        expr: AVG(risk_score)
+
+      - name: true_fraud_caught_count
+        synonyms: ["true positives", "detected fraud events", "intercepted fraud"]
+        description: "Count of actual fraud events successfully intercepted in the BLOCK tier."
+        expr: COUNT_IF(is_fraud = TRUE AND risk_tier = 'BLOCK')
+
+      - name: false_positive_count
+        synonyms: ["false positives", "legitimate users blocked", "unwarranted blocks"]
+        description: "Count of legitimate logins that were incorrectly blocked."
+        expr: COUNT_IF(is_fraud = FALSE AND risk_tier = 'BLOCK')
+
+      - name: fraud_catch_rate
+        synonyms: ["recall", "true positive rate", "detection rate", "fraud coverage"]
+        description: "Percentage of total fraud attempts successfully blocked at the login gate."
+        expr: COUNT_IF(is_fraud = TRUE AND risk_tier = 'BLOCK') / NULLIF(COUNT_IF(is_fraud = TRUE), 0)
+
+      - name: false_positive_rate
+        synonyms: ["FPR", "false alarm rate", "legitimate block rate"]
+        description: "Percentage of legitimate logins that were blocked."
+        expr: COUNT_IF(is_fraud = FALSE AND risk_tier = 'BLOCK') / NULLIF(COUNT_IF(is_fraud = FALSE), 0)
+
+      - name: unique_compromised_accounts
+        synonyms: ["compromised accounts count", "ATO customer count", "victims count"]
+        description: "Count of distinct customers affected by ATO attacks."
+        expr: COUNT(DISTINCT IFF(is_fraud = TRUE, customer_id, NULL))
+
+
+  # 2. Customer Accounts Dimension
+  - name: customers
+    description: "Customer account profiles, tier classification (standard vs high_value), and baseline MFA enrollment."
+    base_table:
+      database: ATO_FRAUD_DB
+      schema: RAW
+      table: RAW_CUSTOMER_ACCOUNTS
+    primary_key:
+      columns: [customer_id]
+
+    dimensions:
+      - name: account_tier
+        synonyms: ["customer tier", "account segment", "VIP tier", "tier"]
+        description: "Account value segment: 'standard' (90%) or 'high_value' (10%)."
+        expr: account_tier
+        data_type: VARCHAR
+        is_enum: true
+
+      - name: mfa_enrolled
+        synonyms: ["MFA status", "2FA enabled", "has MFA", "two factor"]
+        description: "Boolean indicating whether the customer is enrolled in Multi-Factor Authentication."
+        expr: mfa_enrolled
+        data_type: BOOLEAN
+
+      - name: account_status
+        synonyms: ["customer status", "account state", "lifecycle state"]
+        description: "Account lifecycle status: 'active', 'dormant', 'locked'."
+        expr: account_status
+        data_type: VARCHAR
+        is_enum: true
+
+    time_dimensions:
+      - name: account_created_at
+        synonyms: ["signup date", "registration date", "account creation date"]
+        description: "Timestamp when the account was originally registered."
+        expr: account_created_at
+        data_type: TIMESTAMP_NTZ
+
+    metrics:
+      - name: total_customers
+        synonyms: ["customer count", "account count", "total users"]
+        description: "Total number of registered customer accounts."
+        expr: COUNT(customer_id)
+
+      - name: high_value_customer_count
+        synonyms: ["VIP customers", "high value accounts count"]
+        description: "Count of high-value customer accounts."
+        expr: COUNT_IF(account_tier = 'high_value')
+
+
+  # 3. Device Registry Dimension
+  - name: devices
+    description: "Registered user devices, hardware fingerprints, operating systems, and emulator detection."
+    base_table:
+      database: ATO_FRAUD_DB
+      schema: RAW
+      table: RAW_DEVICE_REGISTRY
+    primary_key:
+      columns: [device_fingerprint]
+
+    dimensions:
+      - name: device_type
+        synonyms: ["hardware type", "platform", "device category"]
+        description: "Form factor: 'mobile', 'desktop', 'tablet'."
+        expr: device_type
+        data_type: VARCHAR
+        is_enum: true
+
+      - name: os
+        synonyms: ["operating system", "OS platform"]
+        description: "Operating system (iOS, Android, Windows, macOS, Linux)."
+        expr: os
+        data_type: VARCHAR
+
+      - name: browser
+        synonyms: ["web browser", "client browser"]
+        description: "Web browser used (Chrome, Safari, Firefox, Edge)."
+        expr: browser
+        data_type: VARCHAR
+
+      - name: is_trusted
+        synonyms: ["trusted device", "known device", "recognized hardware"]
+        description: "Boolean indicating whether the device is in the customer's trusted device registry."
+        expr: is_trusted
+        data_type: BOOLEAN
+
+      - name: is_emulator
+        synonyms: ["emulator flag", "virtual device", "spoofed device"]
+        description: "Boolean indicating whether device virtualization or emulation was detected."
+        expr: is_emulator
+        data_type: BOOLEAN
+
+    metrics:
+      - name: total_registered_devices
+        synonyms: ["device count", "total devices"]
+        description: "Total number of registered devices."
+        expr: COUNT(device_fingerprint)
+
+      - name: emulator_device_count
+        synonyms: ["emulated devices", "spoofed devices count"]
+        description: "Count of emulated or spoofed devices."
+        expr: COUNT_IF(is_emulator = TRUE)
+
+
+  # 4. Profile Changes Fact Table
+  - name: account_changes
+    description: "Profile mutation events including email, phone, password, and recovery modifications."
+    base_table:
+      database: ATO_FRAUD_DB
+      schema: RAW
+      table: RAW_ACCOUNT_CHANGES
+    primary_key:
+      columns: [change_id]
+
+    dimensions:
+      - name: change_type
+        synonyms: ["mutation type", "what changed", "profile update type"]
+        description: "Attribute modified (email, phone, password, address, recovery_email)."
+        expr: change_type
+        data_type: VARCHAR
+        is_enum: true
+
+      - name: channel
+        synonyms: ["change channel", "update source"]
+        description: "Channel where profile mutation occurred (web, mobile_app, call_center, api)."
+        expr: channel
+        data_type: VARCHAR
+
+    time_dimensions:
+      - name: change_timestamp
+        synonyms: ["change date", "mutation time", "update timestamp"]
+        description: "Timestamp when the profile modification was requested."
+        expr: change_ts
+        data_type: TIMESTAMP_NTZ
+
+    metrics:
+      - name: total_profile_changes
+        synonyms: ["profile mutation count", "number of changes", "updates count"]
+        description: "Total number of account profile modifications."
+        expr: COUNT(change_id)
+
+      - name: phone_change_count
+        synonyms: ["SIM swap indicators", "phone updates", "phone modifications"]
+        description: "Count of phone number changes (SIM-swap vector)."
+        expr: COUNT_IF(change_type = 'phone')
+
+
+  # 5. Threat Intelligence Dimension
+  - name: threat_intel
+    description: "Threat reputation indicators for IPs, devices, emails, and phones from threat feeds and breach databases."
+    base_table:
+      database: ATO_FRAUD_DB
+      schema: RAW
+      table: RAW_THREAT_INTEL
+    primary_key:
+      columns: [indicator_id]
+
+    dimensions:
+      - name: indicator_type
+        synonyms: ["threat type", "entity indicator type"]
+        description: "Type of threat indicator ('ip', 'device', 'email', 'phone')."
+        expr: indicator_type
+        data_type: VARCHAR
+        is_enum: true
+
+      - name: threat_category
+        synonyms: ["reputation category", "threat classification", "feed category"]
+        description: "Category of threat (credential_compromise, sim_swap, proxy, botnet, tor, fraud_ring)."
+        expr: threat_category
+        data_type: VARCHAR
+        is_enum: true
+
+      - name: confidence
+        synonyms: ["threat confidence", "reputation reliability"]
+        description: "Threat intelligence confidence level ('high', 'medium', 'low')."
+        expr: confidence
+        data_type: VARCHAR
+
+    facts:
+      - name: threat_risk_score
+        synonyms: ["threat score", "external risk score"]
+        description: "External threat intelligence risk rating (0-100)."
+        expr: risk_score
+        data_type: INT
+
+
+  # 6. Master Fraud Policies Dimension
+  - name: policies
+    description: "Master fraud and risk management policies register with governance and lifecycle status."
+    base_table:
+      database: ATO_FRAUD_DB
+      schema: POLICY_ENGINE
+      table: FRAUD_POLICY
+    primary_key:
+      columns: [policy_id]
+
+    dimensions:
+      - name: policy_name
+        synonyms: ["policy title", "governance policy", "policy document"]
+        description: "Official title of the policy (Account Takeover Policy, MFA Policy, Account Lockout Policy, Transaction Monitoring Policy, Customer Notification Policy, Fraud Investigation Policy)."
+        expr: policy_name
+        data_type: VARCHAR
+
+      - name: policy_category
+        synonyms: ["policy domain", "governance category"]
+        description: "Category code (ATO, MFA, LOCKOUT, TRANSACTION_MONITORING, NOTIFICATION, INVESTIGATION)."
+        expr: policy_category
+        data_type: VARCHAR
+        is_enum: true
+
+      - name: owner_role
+        synonyms: ["policy owner", "responsible team", "owning role"]
+        description: "Snowflake role responsible for policy governance (e.g. ATO_FRAUD_OPS, ATO_COMPLIANCE)."
+        expr: owner_role
+        data_type: VARCHAR
+
+      - name: status
+        synonyms: ["policy status", "lifecycle status"]
+        description: "Policy lifecycle state (ACTIVE, DRAFT, UNDER_REVIEW, DEPRECATED)."
+        expr: status
+        data_type: VARCHAR
+        is_enum: true
+
+      - name: regulatory_reference
+        synonyms: ["regulation", "statute", "compliance standard"]
+        description: "Associated regulatory frameworks (e.g. FFIEC, PSD2 SCA, NIST SP 800-63B, Reg E)."
+        expr: regulatory_reference
+        data_type: VARCHAR
+
+    metrics:
+      - name: total_active_policies
+        synonyms: ["active policy count", "number of policies"]
+        description: "Count of currently active policies."
+        expr: COUNT_IF(status = 'ACTIVE')
+
+
+  # 7. Enforceable Policy Rules Dimension
+  - name: policy_rules
+    description: "Individual business rules within policies with executable condition expressions, required actions, and severity."
+    base_table:
+      database: ATO_FRAUD_DB
+      schema: POLICY_ENGINE
+      table: POLICY_RULE
+    primary_key:
+      columns: [policy_rule_id]
+
+    dimensions:
+      - name: rule_name
+        synonyms: ["rule title", "policy rule", "control name"]
+        description: "Descriptive name of the rule (e.g., 'Impossible Travel Detection', 'Credential Stuffing Detection')."
+        expr: rule_name
+        data_type: VARCHAR
+
+      - name: rule_code
+        synonyms: ["rule identifier", "control ID", "rule ID"]
+        description: "Standard rule code (e.g., ATO-R-001, MFA-R-001, LOCK-R-001, TXN-R-001, INV-R-001)."
+        expr: rule_code
+        data_type: VARCHAR
+
+      - name: required_action
+        synonyms: ["mandated action", "policy action", "required response"]
+        description: "Action required upon rule trigger: SAFE, STEP_UP, BLOCK, LOCKOUT, NOTIFY_CUSTOMER, ESCALATE, FILE_SAR, REFER_LAW_ENFORCEMENT."
+        expr: required_action
+        data_type: VARCHAR
+        is_enum: true
+
+      - name: severity
+        synonyms: ["rule severity", "risk level", "criticality"]
+        description: "Rule severity level (CRITICAL, HIGH, MEDIUM, LOW)."
+        expr: severity
+        data_type: VARCHAR
+        is_enum: true
+
+      - name: is_active
+        synonyms: ["rule active", "enabled rule"]
+        description: "Boolean indicating whether the rule is currently active and enforced."
+        expr: is_active
+        data_type: BOOLEAN
+
+      - name: override_requires_approval
+        synonyms: ["needs approval to override", "approval required"]
+        description: "Boolean indicating whether overriding this rule requires manager approval."
+        expr: override_requires_approval
+        data_type: BOOLEAN
+
+    metrics:
+      - name: total_active_rules
+        synonyms: ["active rules count", "rule count"]
+        description: "Total number of active policy rules."
+        expr: COUNT_IF(is_active = TRUE)
+
+      - name: critical_rule_count
+        synonyms: ["critical severity rules", "high priority rules"]
+        description: "Count of CRITICAL severity rules."
+        expr: COUNT_IF(severity = 'CRITICAL' AND is_active = TRUE)
+
+
+  # 8. Policy Rule Evaluation Audit Fact Table
+  - name: rule_evaluations
+    description: "Audit trail logging every policy rule evaluation against scored logins, including triggers and overrides."
+    base_table:
+      database: ATO_FRAUD_DB
+      schema: POLICY_ENGINE
+      table: POLICY_RULE_EVALUATION
+    primary_key:
+      columns: [evaluation_id]
+
+    dimensions:
+      - name: condition_result
+        synonyms: ["rule triggered", "condition matched", "rule fired"]
+        description: "Boolean: TRUE if the rule condition matched the login event."
+        expr: condition_result
+        data_type: BOOLEAN
+
+      - name: action_taken
+        synonyms: ["applied action", "executed response", "final action"]
+        description: "Actual action executed (BLOCK, STEP_UP, LOCKOUT, NOTIFY_CUSTOMER, ESCALATE, FILE_SAR, REFER_LAW_ENFORCEMENT)."
+        expr: action_taken
+        data_type: VARCHAR
+        is_enum: true
+
+      - name: override_flag
+        synonyms: ["was overridden", "exception granted", "analyst override"]
+        description: "Boolean: TRUE if an analyst or manager manually overridden the mandated action."
+        expr: override_flag
+        data_type: BOOLEAN
+
+      - name: override_reason
+        synonyms: ["reason for exception", "justification"]
+        description: "Documented business reason for the rule override."
+        expr: override_reason
+        data_type: VARCHAR
+
+    time_dimensions:
+      - name: evaluation_timestamp
+        synonyms: ["evaluated at", "evaluation time", "audit timestamp"]
+        description: "Timestamp when the rule was evaluated."
+        expr: evaluation_ts
+        data_type: TIMESTAMP_NTZ
+
+    metrics:
+      - name: total_rule_evaluations
+        synonyms: ["evaluation count", "audit records"]
+        description: "Total number of rule evaluations executed."
+        expr: COUNT(evaluation_id)
+
+      - name: total_rule_triggers
+        synonyms: ["rule triggers", "rules fired count", "violations detected"]
+        description: "Count of times policy rules evaluated to TRUE."
+        expr: COUNT_IF(condition_result = TRUE)
+
+      - name: total_overrides_granted
+        synonyms: ["override count", "exceptions count", "analyst exceptions"]
+        description: "Count of rule evaluations where an override was granted."
+        expr: COUNT_IF(override_flag = TRUE)
+
+      - name: rule_override_rate
+        synonyms: ["exception rate", "override percentage"]
+        description: "Percentage of rule triggers that were manually overridden."
+        expr: COUNT_IF(override_flag = TRUE) / NULLIF(COUNT_IF(condition_result = TRUE), 0)
+
+
+# Relationships Connecting Logical Tables
+relationships:
+  - name: login_to_customer
+    left_table: login_events
+    right_table: customers
+    relationship_columns:
+      - left_column: customer_id
+        right_column: customer_id
+
+  - name: login_to_device
+    left_table: login_events
+    right_table: devices
+    relationship_columns:
+      - left_column: device_fingerprint
+        right_column: device_fingerprint
+
+  - name: change_to_customer
+    left_table: account_changes
+    right_table: customers
+    relationship_columns:
+      - left_column: customer_id
+        right_column: customer_id
+
+  - name: rule_to_policy
+    left_table: policy_rules
+    right_table: policies
+    relationship_columns:
+      - left_column: policy_id
+        right_column: policy_id
+
+  - name: evaluation_to_rule
+    left_table: rule_evaluations
+    right_table: policy_rules
+    relationship_columns:
+      - left_column: policy_rule_id
+        right_column: policy_rule_id
+
+  - name: evaluation_to_login
+    left_table: rule_evaluations
+    right_table: login_events
+    relationship_columns:
+      - left_column: event_id
+        right_column: event_id
+
+
+# Verified Queries (14 VQRs for Cortex Analyst Training)
+verified_queries:
+  - name: blocked_logins_summary
+    question: "How many login attempts were blocked and what was the average risk score?"
+    sql: "SELECT COUNT_IF(risk_tier = 'BLOCK') AS blocked_logins, AVG(risk_score) AS avg_score FROM ATO_FRAUD_DB.SCORING.DT_SCORED_LOGINS"
+
+  - name: top_fraud_scenarios
+    question: "What are the top fraud scenarios by volume?"
+    sql: "SELECT fraud_scenario, COUNT(*) AS event_count FROM ATO_FRAUD_DB.SCORING.DT_SCORED_LOGINS WHERE is_fraud = TRUE GROUP BY fraud_scenario ORDER BY event_count DESC"
+
+  - name: decision_breakdown_by_tier
+    question: "Show me the breakdown of login decisions by risk tier"
+    sql: "SELECT risk_tier, COUNT(*) AS login_count, ROUND(AVG(risk_score), 1) AS avg_score FROM ATO_FRAUD_DB.SCORING.DT_SCORED_LOGINS GROUP BY risk_tier ORDER BY login_count DESC"
+
+  - name: recall_detection_rate
+    question: "What is our overall fraud detection rate (recall) at the login gate?"
+    sql: "SELECT ROUND(100.0 * COUNT_IF(is_fraud = TRUE AND risk_tier = 'BLOCK') / NULLIF(COUNT_IF(is_fraud = TRUE), 0), 2) AS fraud_catch_rate_pct FROM ATO_FRAUD_DB.SCORING.DT_SCORED_LOGINS"
+
+  - name: false_positive_rate_by_segment
+    question: "What is the false positive rate for high-value vs standard customer segments?"
+    sql: "SELECT c.account_tier, COUNT_IF(sl.is_fraud = FALSE AND sl.risk_tier = 'BLOCK') AS false_positives, COUNT_IF(sl.is_fraud = FALSE) AS total_legit, ROUND(100.0 * COUNT_IF(sl.is_fraud = FALSE AND sl.risk_tier = 'BLOCK') / NULLIF(COUNT_IF(sl.is_fraud = FALSE), 0), 4) AS fpr_pct FROM ATO_FRAUD_DB.SCORING.DT_SCORED_LOGINS sl JOIN ATO_FRAUD_DB.RAW.RAW_CUSTOMER_ACCOUNTS c ON sl.customer_id = c.customer_id GROUP BY c.account_tier"
+
+  - name: vpn_tor_risk_comparison
+    question: "What is the average risk score for VPN and Tor logins compared to normal connections?"
+    sql: "SELECT CASE WHEN is_tor THEN 'Tor Connection' WHEN is_vpn THEN 'VPN Connection' ELSE 'Standard Network' END AS connection_type, COUNT(*) AS login_count, ROUND(AVG(risk_score), 1) AS avg_risk_score FROM ATO_FRAUD_DB.SCORING.DT_SCORED_LOGINS GROUP BY 1 ORDER BY avg_risk_score DESC"
+
+  - name: impossible_travel_events
+    question: "How many impossible travel logins were detected and what was the maximum speed?"
+    sql: "SELECT COUNT(*) AS impossible_travel_count, MAX(geo_velocity_kmh) AS max_speed_kmh FROM ATO_FRAUD_DB.SCORING.DT_SCORED_LOGINS WHERE geo_velocity_kmh > 1000"
+
+  - name: phone_mutation_fraud_correlation
+    question: "How many customers with phone changes were flagged for SIM-swap fraud?"
+    sql: "SELECT COUNT(DISTINCT customer_id) AS sim_swap_compromised_customers FROM ATO_FRAUD_DB.SCORING.DT_SCORED_LOGINS WHERE fraud_scenario = 'sim_swap' AND is_fraud = TRUE"
+
+  - name: top_triggered_policy_rules
+    question: "Which policy rules triggered most frequently?"
+    sql: "SELECT pr.rule_code, pr.rule_name, pr.severity, pr.required_action, COUNT(*) AS trigger_count FROM ATO_FRAUD_DB.POLICY_ENGINE.POLICY_RULE_EVALUATION e JOIN ATO_FRAUD_DB.POLICY_ENGINE.POLICY_RULE pr ON e.policy_rule_id = pr.policy_rule_id GROUP BY pr.rule_code, pr.rule_name, pr.severity, pr.required_action ORDER BY trigger_count DESC"
+
+  - name: active_critical_rules
+    question: "Show me all active CRITICAL severity policy rules"
+    sql: "SELECT pr.rule_code, pr.rule_name, pr.required_action, pr.condition_description FROM ATO_FRAUD_DB.POLICY_ENGINE.POLICY_RULE pr WHERE pr.severity = 'CRITICAL' AND pr.is_active = TRUE ORDER BY pr.priority"
+
+  - name: policy_rule_overrides_summary
+    question: "How many policy rule overrides were approved and for which rules?"
+    sql: "SELECT pr.rule_code, pr.rule_name, COUNT(*) AS override_count, MAX(e.override_reason) AS sample_reason FROM ATO_FRAUD_DB.POLICY_ENGINE.POLICY_RULE_EVALUATION e JOIN ATO_FRAUD_DB.POLICY_ENGINE.POLICY_RULE pr ON e.policy_rule_id = pr.policy_rule_id WHERE e.override_flag = TRUE GROUP BY pr.rule_code, pr.rule_name"
+
+  - name: mfa_policy_stepup_rate
+    question: "How many logins triggered MFA step-up authentication rules?"
+    sql: "SELECT pr.rule_code, pr.rule_name, COUNT(*) AS mfa_challenges FROM ATO_FRAUD_DB.POLICY_ENGINE.POLICY_RULE_EVALUATION e JOIN ATO_FRAUD_DB.POLICY_ENGINE.POLICY_RULE pr ON e.policy_rule_id = pr.policy_rule_id WHERE pr.policy_id = 2 GROUP BY pr.rule_code, pr.rule_name ORDER BY mfa_challenges DESC"
+
+  - name: high_value_account_fraud_exposure
+    question: "How many high-value accounts experienced ATO attacks?"
+    sql: "SELECT c.account_tier, COUNT(DISTINCT IFF(sl.is_fraud = TRUE, sl.customer_id, NULL)) AS compromised_accounts, COUNT(DISTINCT sl.customer_id) AS total_accounts FROM ATO_FRAUD_DB.SCORING.DT_SCORED_LOGINS sl JOIN ATO_FRAUD_DB.RAW.RAW_CUSTOMER_ACCOUNTS c ON sl.customer_id = c.customer_id GROUP BY c.account_tier"
+
+  - name: primary_risk_factors_breakdown
+    question: "What are the primary risk factors driving BLOCK decisions?"
+    sql: "SELECT primary_risk_factor, COUNT(*) AS block_count FROM ATO_FRAUD_DB.SCORING.DT_SCORED_LOGINS WHERE risk_tier = 'BLOCK' GROUP BY primary_risk_factor ORDER BY block_count DESC"
+
+
+# Custom Instructions for Cortex Analyst
+module_custom_instructions:
+  sql_generation: |
+    - Database is ATO_FRAUD_DB, scoring table is SCORING.DT_SCORED_LOGINS.
+    - risk_score is on a 0 to 1000 integer scale:
+        * SAFE: score < 350 (frictionless login)
+        * STEP-UP: score 350 to 749 (adaptive MFA challenge)
+        * BLOCK: score >= 750 (interception / automated stop)
+    - is_fraud is the ground truth label (TRUE = actual ATO event, FALSE = legitimate).
+    - risk_tier is the model / policy decision outcome ('SAFE', 'STEP-UP', 'BLOCK').
+    - When asked about "fraud rate" or "catch rate":
+        * Fraud Catch Rate / Recall = COUNT_IF(is_fraud = TRUE AND risk_tier = 'BLOCK') / COUNT_IF(is_fraud = TRUE)
+        * False Positive Rate = COUNT_IF(is_fraud = FALSE AND risk_tier = 'BLOCK') / COUNT_IF(is_fraud = FALSE)
+    - Impossible travel is defined as geo_velocity_kmh > 1000.
+    - Policy rules are in POLICY_ENGINE.POLICY_RULE, audit evaluations are in POLICY_ENGINE.POLICY_RULE_EVALUATION.
+    - When asked about policy overrides or exceptions, query POLICY_RULE_EVALUATION WHERE override_flag = TRUE.
+    - All timestamps are UTC.
+  question_categorization: |
+    - Structured data questions (metrics, trends, distributions, rule triggers, overrides) -> use this semantic view.
+    - Unstructured questions (policy documentation, regulatory text, investigation SOPs) -> route to Cortex Search / MCP.

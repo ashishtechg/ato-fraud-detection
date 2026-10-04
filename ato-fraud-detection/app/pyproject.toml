@@ -1,0 +1,12 @@
+[project]
+name = "ato-fraud-analyst-dashboard"
+version = "1.0.0"
+description = "Real-Time Account Takeover Fraud Detection & Regulatory Compliance Command Center"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.35.0",
+    "snowflake-snowpark-python>=1.18.0",
+    "pandas>=2.0.0",
+    "altair>=5.0.0"
+]

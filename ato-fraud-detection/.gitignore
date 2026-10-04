@@ -1,0 +1,52 @@
+# Snowflake
+.snowflake/
+*.snowflake-session
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+*.pkl
+*.joblib
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+credentials.json
+*.pem
+*.key
+
+# Lock files (contain Snowflake-internal registry URLs)
+uv.lock
+
+# Data artifacts (regenerated from scripts)
+*.csv
+*.parquet
+
+# ML model artifacts (retrained locally, registered in Snowflake Model Registry)
+models/artifacts/*.json
+models/artifacts/*.joblib
+models/artifacts/*.pkl
+/tmp/ato-fraud-detection/
+
+# Cortex project build artifacts
+cortex_project/.cache/
+cortex_project/*.tmp
+
+# Snowflake stage snapshots (downloaded via GET)
+*.gz

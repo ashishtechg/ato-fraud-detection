@@ -1,0 +1,19 @@
+# created-by: streamlit-in-workspaces; skill-version=1.0.0
+definition_version: 2
+entities:
+  streamlit_app:
+    type: streamlit
+    main_file: streamlit_app.py
+    query_warehouse: COMPUTE_WH
+    compute_pool: SYSTEM_COMPUTE_POOL_CPU
+    artifacts:
+      - pyproject.toml
+      - streamlit_app.py
+      - .streamlit/config.toml
+      - app_pages/01_fraud_analytics.py
+      - app_pages/02_policy_rules.py
+      - app_pages/03_regulatory_lookup.py
+      - app_pages/04_investigation_queue.py
+      - components/metrics_cards.py
+      - federal_register_mcp.py
+      - agent_runner.py

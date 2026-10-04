@@ -1,0 +1,56 @@
+-- ============================================================================
+-- Governance: Dynamic Masking Policies
+-- Protects PII attributes (email, phone, IP address, device fingerprints)
+-- RBAC Privileged Roles: ACCOUNTADMIN, ATO_FRAUD_ADMIN, ATO_FRAUD_INVESTIGATOR
+-- Redacted for: ATO_ANALYST_L1, PUBLIC, and standard analytical roles
+-- ============================================================================
+
+USE DATABASE ATO_FRAUD_DB;
+CREATE SCHEMA IF NOT EXISTS ATO_FRAUD_DB.GOVERNANCE;
+USE SCHEMA GOVERNANCE;
+
+-- 1. Email Masking Policy (Shows first char and domain, or full redaction)
+CREATE OR REPLACE MASKING POLICY ATO_FRAUD_DB.GOVERNANCE.MASK_EMAIL AS (val VARCHAR) RETURNS VARCHAR ->
+    CASE
+        WHEN CURRENT_ROLE() IN ('ACCOUNTADMIN', 'ATO_FRAUD_ADMIN', 'ATO_FRAUD_INVESTIGATOR') THEN val
+        WHEN val IS NULL THEN NULL
+        ELSE REGEXP_REPLACE(val, '(^[^@]{2})[^@]+(@.*$)', '\\1***\\2')
+    END;
+
+-- 2. Phone Number Masking Policy (Retains last 4 digits)
+CREATE OR REPLACE MASKING POLICY ATO_FRAUD_DB.GOVERNANCE.MASK_PHONE AS (val VARCHAR) RETURNS VARCHAR ->
+    CASE
+        WHEN CURRENT_ROLE() IN ('ACCOUNTADMIN', 'ATO_FRAUD_ADMIN', 'ATO_FRAUD_INVESTIGATOR') THEN val
+        WHEN val IS NULL THEN NULL
+        ELSE CONCAT('***-***-', RIGHT(val, 4))
+    END;
+
+-- 3. IP Address Masking Policy (Masks last octet / partial subnet)
+CREATE OR REPLACE MASKING POLICY ATO_FRAUD_DB.GOVERNANCE.MASK_IP_ADDRESS AS (val VARCHAR) RETURNS VARCHAR ->
+    CASE
+        WHEN CURRENT_ROLE() IN ('ACCOUNTADMIN', 'ATO_FRAUD_ADMIN', 'ATO_FRAUD_INVESTIGATOR') THEN val
+        WHEN val IS NULL THEN NULL
+        ELSE REGEXP_REPLACE(val, '\\.[0-9]+$', '.xxx')
+    END;
+
+-- 4. Device Fingerprint Hash Redaction Policy
+CREATE OR REPLACE MASKING POLICY ATO_FRAUD_DB.GOVERNANCE.MASK_DEVICE_FINGERPRINT AS (val VARCHAR) RETURNS VARCHAR ->
+    CASE
+        WHEN CURRENT_ROLE() IN ('ACCOUNTADMIN', 'ATO_FRAUD_ADMIN', 'ATO_FRAUD_INVESTIGATOR') THEN val
+        WHEN val IS NULL THEN NULL
+        ELSE CONCAT(LEFT(val, 6), '...[REDACTED]')
+    END;
+
+-- Apply Masking Policies to Raw Customer Accounts
+ALTER TABLE ATO_FRAUD_DB.RAW.RAW_CUSTOMER_ACCOUNTS 
+    MODIFY COLUMN email SET MASKING POLICY ATO_FRAUD_DB.GOVERNANCE.MASK_EMAIL;
+
+ALTER TABLE ATO_FRAUD_DB.RAW.RAW_CUSTOMER_ACCOUNTS 
+    MODIFY COLUMN phone_number SET MASKING POLICY ATO_FRAUD_DB.GOVERNANCE.MASK_PHONE;
+
+-- Apply Masking Policies to Raw Login Events
+ALTER TABLE ATO_FRAUD_DB.RAW.RAW_LOGIN_ATTEMPTS 
+    MODIFY COLUMN ip_address SET MASKING POLICY ATO_FRAUD_DB.GOVERNANCE.MASK_IP_ADDRESS;
+
+ALTER TABLE ATO_FRAUD_DB.RAW.RAW_LOGIN_ATTEMPTS 
+    MODIFY COLUMN device_fingerprint SET MASKING POLICY ATO_FRAUD_DB.GOVERNANCE.MASK_DEVICE_FINGERPRINT;
