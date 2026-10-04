@@ -17,3 +17,12 @@ entities:
       - components/metrics_cards.py
       - federal_register_mcp.py
       - agent_runner.py
+    identifier:
+      database: ATO_FRAUD_DB
+      schema: APP
+      name: APP
+    title: ATO-Fraud-Detection
+    run_mode: SpcsOnly
+    execute_as: OWNER
+    artifact_repositories:
+      - SNOWFLAKE.SNOWPARK.PYPI_SHARED_REPOSITORY
