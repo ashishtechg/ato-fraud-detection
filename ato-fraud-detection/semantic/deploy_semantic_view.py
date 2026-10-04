@@ -6,14 +6,13 @@ Reads ato_fraud_analytics_sv.yaml and calls SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAM
 """
 
 import os
-import sys
-
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../models"))
-from snowpark_helper import get_session
+from snowflake.snowpark.context import get_active_session
 
 
 def deploy_semantic_view():
-    session = get_session(database="ATO_FRAUD_DB", schema="SEMANTIC")
+    session = get_active_session()
+    session.use_database("ATO_FRAUD_DB")
+    session.use_schema("SEMANTIC")
     print("Snowpark session connected for Semantic View deployment.")
 
     yaml_path = "/workspace/ato-fraud-detection/semantic/ato_fraud_analytics_sv.yaml"
