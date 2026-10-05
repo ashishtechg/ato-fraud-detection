@@ -1,169 +1,145 @@
 """
-Unified ATO Fraud & Compliance Agent Runner (Streamlit Workspace edition)
-Routes user queries across:
-1. Cortex Analyst (Semantic View: ATO_FRAUD_ANALYTICS_SV)
-2. Cortex Search (Internal Policy Corpus: ATO_POLICY_SEARCH)
-3. Federal Register FastMCP (Regulatory Compliance Lookup)
+ATO Fraud Agent Runner — Cortex Agent Integration
+Calls the deployed Cortex Agent (ATO_FRAUD_DB.APP.ATO_FRAUD_AGENT) via
+SNOWFLAKE.CORTEX.DATA_AGENT_RUN. The agent handles all routing across:
+  1. Cortex Analyst (Semantic View)
+  2. Cortex Search (Internal Policies)
+  3. Federal Register (Stored Procedures via EAI)
 """
 
 import json
-import re
 import os
-import sys
-import importlib.util
 import streamlit as st
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
-def _import_from_app_root(module_name):
-    for base in [
-        os.path.dirname(os.path.abspath(__file__)),
-        os.getcwd(),
-        "/opt/streamlit-runtime",
-    ]:
-        path = os.path.join(base, f"{module_name}.py")
-        if os.path.exists(path):
-            spec = importlib.util.spec_from_file_location(module_name, path)
-            mod = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = mod
-            spec.loader.exec_module(mod)
-            return mod
-    raise ImportError(f"Cannot find {module_name}.py in any known app directory")
-
-
-_fed_mod = _import_from_app_root("federal_register_mcp")
-search_regulations = _fed_mod.search_regulations
+AGENT_FQN = "ATO_FRAUD_DB.APP.ATO_FRAUD_AGENT"
 
 
 class ATOFraudAgent:
-    """Unified Multi-Channel Fraud & Compliance Intelligence Agent."""
+    """Calls the deployed Cortex Agent for all question routing."""
 
     def __init__(self):
         self.conn = st.connection("snowflake", ttl=os.getenv("SNOWFLAKE_CONNECTION_TTL"))
-        self.db = "ATO_FRAUD_DB"
-        self.semantic_schema = "SEMANTIC"
-        self.semantic_view = "ATO_FRAUD_ANALYTICS_SV"
-        self.search_service = "ATO_POLICY_SEARCH"
+        self._thread_id = st.session_state.get("agent_thread_id")
+        self._parent_msg_id = st.session_state.get("agent_parent_msg_id", 0)
 
-    def classify_intent(self, question: str) -> str:
-        """Classify question into SEMANTIC_SQL, INTERNAL_POLICY, or EXTERNAL_REGULATION."""
-        q_lower = question.lower()
+    def _build_request(self, question: str) -> str:
+        messages = [{"role": "user", "content": [{"type": "text", "text": question}]}]
+        body: Dict[str, Any] = {"messages": messages}
+        if self._thread_id is not None:
+            body["thread_id"] = self._thread_id
+            body["parent_message_id"] = self._parent_msg_id
+        return json.dumps(body)
 
-        regulatory_keywords = [
-            "federal register", "cfr", "ftc safeguards", "cfpb", "fincen",
-            "ffiec", "regulation e", "circia", "cisa", "proposed rule",
-            "final rule", "statutory", "legal requirement", "federal law",
-            "federal regulation", "regulatory guidance", "glba"
-        ]
-        if any(kw in q_lower for kw in regulatory_keywords):
-            return "EXTERNAL_REGULATION"
+    def answer(self, user_question: str) -> Dict[str, Any]:
+        """Send question to the Cortex Agent and parse the response."""
+        request_body = self._build_request(user_question)
 
-        is_metric_query = bool(re.search(r'\b(how many|count|average|total|rate|sum|percentage|metric)\b', q_lower))
-        internal_policy_keywords = [
-            "policy", "sop", "procedure", "lockout rule", "mfa threshold",
-            "investigation checklist", "standard operating procedure",
-            "customer notification policy", "escalation", "retention policy",
-            "evidence guide", "what is our policy", "company policy",
-            "internal rule", "internal requirement", "lockout"
-        ]
-        if any(kw in q_lower for kw in internal_policy_keywords) and not is_metric_query:
-            return "INTERNAL_POLICY"
-
-        return "SEMANTIC_SQL"
-
-    def query_internal_policy(self, query: str, limit: int = 3) -> Dict[str, Any]:
-        """Query internal policies via Cortex Search."""
-        safe_query = query.replace("'", "''")
-        search_sql = f"""
-        SELECT SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-            '{self.db}.{self.semantic_schema}.{self.search_service}',
-            '{{
-                "query": "{safe_query}",
-                "columns": ["DOCUMENT_TITLE", "SECTION_NUMBER", "SECTION_TITLE", "OWNER_ROLE", "REGULATORY_REFERENCES"],
-                "limit": {limit}
-            }}'
-        ) AS SEARCH_RESULTS;
+        sql = f"""
+        SELECT SNOWFLAKE.CORTEX.DATA_AGENT_RUN(
+            '{AGENT_FQN}',
+            $${request_body}$$,
+            TRUE
+        ) AS resp
         """
         try:
-            df = self.conn.query(search_sql)
-            raw_json = json.loads(df["SEARCH_RESULTS"].iloc[0])
-            results = raw_json.get("results", [])
-            return {
-                "status": "success",
-                "channel": "CORTEX_SEARCH (Internal Policies)",
-                "query": query,
-                "matches": [
-                    {
-                        "document_title": r.get("DOCUMENT_TITLE"),
-                        "section": f"{r.get('SECTION_NUMBER')} - {r.get('SECTION_TITLE')}",
-                        "owner_role": r.get("OWNER_ROLE"),
-                        "regulatory_references": r.get("REGULATORY_REFERENCES"),
-                        "similarity_score": round(r.get("@scores", {}).get("cosine_similarity", 0.0), 3)
-                    }
-                    for r in results
-                ]
-            }
+            df = self.conn.query(sql)
+            # Column name may be upper or lower case depending on driver
+            raw = df.iloc[0, 0]
+
+            # DATA_AGENT_RUN returns a JSON string; parse it
+            if isinstance(raw, str):
+                resp = json.loads(raw)
+            elif isinstance(raw, dict):
+                resp = raw
+            else:
+                resp = json.loads(str(raw))
+
+            # Check for API-level errors (e.g. missing warehouse, tool issues)
+            if "error_code" in resp or ("code" in resp and "message" in resp and "content" not in resp):
+                return {
+                    "question": user_question,
+                    "status": "error",
+                    "error": resp.get("message", "Unknown agent error"),
+                    "text": f"Agent error: {resp.get('message', 'Unknown error')}",
+                    "tools_used": [],
+                    "sql_statements": [],
+                    "citations": [],
+                    "warnings": [],
+                }
+
+            # Persist thread state for multi-turn conversations
+            metadata = resp.get("metadata", {})
+            if metadata.get("thread_id"):
+                st.session_state["agent_thread_id"] = metadata["thread_id"]
+            if metadata.get("assistant_message_id"):
+                st.session_state["agent_parent_msg_id"] = metadata["assistant_message_id"]
+
+            return self._parse_response(resp, user_question)
+
         except Exception as e:
-            return {"status": "error", "channel": "CORTEX_SEARCH", "error": str(e)}
-
-    def query_external_regulations(self, query: str, agency: Optional[str] = None) -> Dict[str, Any]:
-        """Query external federal regulations via Federal Register MCP."""
-        res = search_regulations(query=query, agency=agency)
-        res["channel"] = "FEDERAL_REGISTER_MCP (External Regulations)"
-        return res
-
-    def query_structured_analytics(self, sql_query: str) -> Dict[str, Any]:
-        """Execute governed SQL query against Snowflake Semantic tables."""
-        clean_sql = sql_query.strip().rstrip(";")
-        try:
-            df = self.conn.query(clean_sql)
-            rows = df.head(100).to_dict(orient="records")
-            return {
-                "status": "success",
-                "channel": "SEMANTIC_VIEW_SQL (Cortex Analyst)",
-                "sql": clean_sql,
-                "row_count": len(rows),
-                "data": rows
-            }
-        except Exception as e:
-            return {"status": "error", "channel": "SEMANTIC_VIEW_SQL", "error": str(e), "sql": clean_sql}
-
-    def answer(self, user_question: str, custom_sql: Optional[str] = None) -> Dict[str, Any]:
-        """Process user question through the appropriate channel."""
-        intent = self.classify_intent(user_question)
-
-        if intent == "EXTERNAL_REGULATION":
-            reg_result = self.query_external_regulations(user_question)
             return {
                 "question": user_question,
-                "routing_decision": "FEDERAL_REGISTER_MCP",
-                "result": reg_result
+                "status": "error",
+                "error": str(e),
+                "text": f"Agent call failed: {e}",
+                "tools_used": [],
+                "sql_statements": [],
+                "citations": [],
+                "warnings": [],
             }
 
-        elif intent == "INTERNAL_POLICY":
-            policy_result = self.query_internal_policy(user_question)
-            return {
-                "question": user_question,
-                "routing_decision": "CORTEX_SEARCH_INTERNAL_POLICY",
-                "result": policy_result
-            }
+    def _parse_response(self, resp: Dict[str, Any], question: str) -> Dict[str, Any]:
+        """Extract text, tool calls, and citations from agent response."""
+        content_blocks = resp.get("content", [])
+        text_parts: List[str] = []
+        tools_used: List[Dict[str, Any]] = []
+        citations: List[Dict[str, Any]] = []
+        sql_statements: List[str] = []
 
-        else:
-            if not custom_sql:
-                custom_sql = """
-                SELECT
-                    DECISION,
-                    COUNT(*) AS total_sessions,
-                    ROUND(AVG(ENSEMBLE_RISK_SCORE), 1) AS avg_risk_score,
-                    SUM(CASE WHEN IS_FRAUD_ACTUAL THEN 1 ELSE 0 END) AS confirmed_fraud,
-                    MAX(SCORED_AT) AS latest_score_ts
-                FROM ATO_FRAUD_DB.SCORING.ENSEMBLE_FRAUD_SCORES
-                GROUP BY DECISION
-                ORDER BY avg_risk_score DESC;
-                """
-            sql_result = self.query_structured_analytics(custom_sql)
-            return {
-                "question": user_question,
-                "routing_decision": "CORTEX_ANALYST_SEMANTIC_VIEW",
-                "result": sql_result
-            }
+        for block in content_blocks:
+            block_type = block.get("type", "")
+
+            if block_type == "text":
+                text_parts.append(block.get("text", ""))
+
+            elif block_type == "tool_use":
+                tool_info = block.get("tool_use", {})
+                tools_used.append({
+                    "name": tool_info.get("name", ""),
+                    "type": tool_info.get("type", ""),
+                    "tool_use_id": tool_info.get("tool_use_id", ""),
+                })
+
+            elif block_type == "tool_result":
+                tool_result = block.get("tool_result", {})
+                # Extract SQL from analyst tool results
+                res_content = tool_result.get("content", [])
+                for rc in res_content:
+                    if rc.get("type") == "tool_result_content_analyst":
+                        analyst_data = rc.get("tool_result_content_analyst", {})
+                        sql_text = analyst_data.get("sql", "")
+                        if sql_text:
+                            sql_statements.append(sql_text)
+
+            elif block_type == "citation":
+                citations.append(block.get("citation", {}))
+
+        warnings = resp.get("warnings", [])
+
+        return {
+            "question": question,
+            "status": "success",
+            "text": "\n\n".join(text_parts),
+            "tools_used": tools_used,
+            "sql_statements": sql_statements,
+            "citations": citations,
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def reset_thread():
+        """Clear thread state to start a new conversation."""
+        st.session_state.pop("agent_thread_id", None)
+        st.session_state.pop("agent_parent_msg_id", None)

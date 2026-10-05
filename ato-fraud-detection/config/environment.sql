@@ -55,6 +55,22 @@ CREATE WAREHOUSE IF NOT EXISTS ATO_SEARCH_WH
     INITIALLY_SUSPENDED = TRUE
     COMMENT = 'Warehouse for Cortex Search service indexing';
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- External Access Integration: Federal Register API (public, no auth)
+-- Required for stored procedures that call federalregister.gov
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE NETWORK RULE IF NOT EXISTS ATO_FRAUD_DB.APP.FEDERAL_REGISTER_NETWORK_RULE
+    MODE = EGRESS
+    TYPE = HOST_PORT
+    VALUE_LIST = ('www.federalregister.gov', 'www.govinfo.gov');
+
+CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION FEDERAL_REGISTER_EAI
+    ALLOWED_NETWORK_RULES = (ATO_FRAUD_DB.APP.FEDERAL_REGISTER_NETWORK_RULE)
+    ALLOWED_AUTHENTICATION_SECRETS = ()
+    ENABLED = TRUE
+    COMMENT = 'Allows stored procedures to call the Federal Register public API for regulatory lookups';
+
 -- Set default context
 USE DATABASE ATO_FRAUD_DB;
 USE SCHEMA RAW;

@@ -1,6 +1,8 @@
 """
 Page 3: Agent & Regulatory Search
-Interactive search interface combining Cortex Search over internal policies with FastMCP Federal Register lookup.
+Tab 1: Cortex Agent chat (routed via DATA_AGENT_RUN)
+Tab 2: Direct Cortex Search for internal policies
+Tab 3: Direct Federal Register lookup (standalone)
 """
 
 import streamlit as st
@@ -37,76 +39,80 @@ ATOFraudAgent = _agent_mod.ATOFraudAgent
 
 conn = st.connection("snowflake", ttl=os.getenv("SNOWFLAKE_CONNECTION_TTL"))
 
-st.title("🔍 Unified Policy & Regulatory Intelligence")
-st.markdown("Query internal risk management policies via Cortex Search, or search external US Federal Regulations via FastMCP.")
+st.title("Unified Policy & Regulatory Intelligence")
+st.markdown("Query internal risk management policies via Cortex Search, or search external US Federal Regulations via the Cortex Agent.")
 
-tab1, tab2, tab3 = st.tabs(["🤖 Cortex Multi-Channel Agent", "📋 Internal Policy Search (Cortex)", "🏛️ Federal Register Regulatory Lookup (MCP)"])
+tab1, tab2, tab3 = st.tabs(["Cortex Agent (All Channels)", "Internal Policy Search (Cortex)", "Federal Register Lookup (Direct)"])
 
 # ---------------------------------------------------------
-# Tab 1: Cortex Agent Chat
+# Tab 1: Cortex Agent Chat — powered by DATA_AGENT_RUN
 # ---------------------------------------------------------
 with tab1:
     st.markdown("#### Ask the ATO Fraud & Regulatory Intelligence Agent")
-    st.caption("Auto-routes questions between Semantic View SQL, Cortex Policy Search, and Federal Register MCP.")
+    st.caption("Routes questions across Cortex Analyst (fraud analytics), Cortex Search (internal policies), and Federal Register (regulatory procedures).")
 
-    # Initialize chat history
+    col_header, col_reset = st.columns([4, 1])
+    with col_reset:
+        if st.button("New Conversation", key="btn_reset"):
+            ATOFraudAgent.reset_thread()
+            st.session_state.agent_messages = []
+            st.rerun()
+
     if "agent_messages" not in st.session_state:
         st.session_state.agent_messages = [
-            {"role": "assistant", "content": "Hello! I am your ATO Fraud & Regulatory Intelligence Agent. Ask me about real-time fraud metrics, internal company policies (MFA, lockouts, investigations), or external Federal Register regulations (FTC Safeguards, CFPB circulars, FinCEN CDD)."}
+            {"role": "assistant", "content": "Hello! I am your ATO Fraud & Regulatory Intelligence Agent. Ask me about:\n- **Fraud analytics** — risk scores, decision tiers, login events\n- **Internal policies** — MFA, lockouts, investigation SOPs\n- **Federal regulations** — FTC Safeguards, CFPB circulars, FinCEN CDD"}
         ]
 
-    for msg in st.session_state.agent_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    # Scrollable chat history container
+    chat_container = st.container(height=500)
 
+    # Chat input at the bottom (rendered below the container)
     user_query = st.chat_input("Enter your fraud, policy, or regulatory question...")
+
+    # Render existing messages inside the scrollable container
+    with chat_container:
+        for msg in st.session_state.agent_messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
     if user_query:
         st.session_state.agent_messages.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
+        with chat_container:
+            with st.chat_message("user"):
+                st.markdown(user_query)
 
-        with st.chat_message("assistant"):
-            with st.spinner("Routing and evaluating question..."):
-                agent = ATOFraudAgent()
-                resp = agent.answer(user_query)
-                routing = resp.get("routing_decision")
-                res = resp.get("result", {})
+            with st.chat_message("assistant"):
+                with st.spinner("Agent is reasoning and routing..."):
+                    agent = ATOFraudAgent()
+                    resp = agent.answer(user_query)
 
-                out_text = f"**Routing Decision:** `{routing}`\n\n"
-                
-                if routing == "FEDERAL_REGISTER_MCP":
-                    out_text += f"**Source:** {res.get('source', 'Federal Register')}\n\n"
-                    docs = res.get("documents", [])
-                    if docs:
-                        for d in docs[:3]:
-                            out_text += f"- **[{d['document_number']}] {d['title']}**\n"
-                            out_text += f"  - *Type:* {d.get('document_type')} | *Action:* {d.get('action')}\n"
-                            out_text += f"  - *Citation:* {d.get('citation')} | [Official Link]({d.get('official_url')})\n\n"
+                    if resp.get("status") == "error":
+                        out_text = f"**Error:** {resp.get('error', 'Unknown error')}"
+                        st.error(out_text)
                     else:
-                        out_text += "No matching federal regulations found for this query."
+                        out_text = resp.get("text", "No response from agent.")
 
-                elif routing == "CORTEX_SEARCH_INTERNAL_POLICY":
-                    matches = res.get("matches", [])
-                    if matches:
-                        for m in matches:
-                            out_text += f"### {m.get('document_title')} ({m.get('section')})\n"
-                            out_text += f"- **Owner:** `{m.get('owner_role')}` | **Ref:** `{m.get('regulatory_references')}`\n"
-                            out_text += f"> {m.get('content', '') if 'content' in m else 'Matches internal policy provisions.'}\n\n"
-                    else:
-                        out_text += "No matching internal policies found."
+                        # Show tools used
+                        tools = resp.get("tools_used", [])
+                        if tools:
+                            tool_names = ", ".join(f"`{t['name']}`" for t in tools)
+                            st.caption(f"Tools used: {tool_names}")
 
-                else:
-                    # Semantic SQL
-                    out_text += f"**Executed Governed SQL:**\n```sql\n{res.get('sql')}\n```\n"
-                    if res.get("data"):
-                        df_preview = pd.DataFrame(res["data"])
-                        st.dataframe(df_preview, width="stretch")
+                        # Show SQL if Cortex Analyst was used
+                        for sql in resp.get("sql_statements", []):
+                            with st.expander("Generated SQL"):
+                                st.code(sql, language="sql")
 
-                st.markdown(out_text)
-                st.session_state.agent_messages.append({"role": "assistant", "content": out_text})
+                        # Show warnings
+                        for w in resp.get("warnings", []):
+                            st.warning(f"Agent warning ({w.get('code', '')}): {w.get('message', '')}")
+
+                        st.markdown(out_text)
+
+                    st.session_state.agent_messages.append({"role": "assistant", "content": out_text})
 
 # ---------------------------------------------------------
-# Tab 2: Internal Policy Search
+# Tab 2: Internal Policy Search (direct Cortex Search)
 # ---------------------------------------------------------
 with tab2:
     st.markdown("#### Search Internal Risk & Fraud SOPs")
@@ -126,7 +132,7 @@ with tab2:
                 res_df = conn.query(search_sql)
                 raw = json.loads(res_df["RES"].iloc[0])
                 results = raw.get("results", [])
-                
+
                 if results:
                     for i, r in enumerate(results, 1):
                         with st.container(border=True):
@@ -140,11 +146,11 @@ with tab2:
                 st.error(f"Error querying Cortex Search: {e}")
 
 # ---------------------------------------------------------
-# Tab 3: Federal Register MCP Search
+# Tab 3: Federal Register Direct Search (standalone)
 # ---------------------------------------------------------
 with tab3:
     st.markdown("#### Federal Register Public Regulatory Lookup")
-    st.caption("Live access to FederalRegister.gov public API for identity verification, MFA, and GLBA Safeguards.")
+    st.caption("Direct access to FederalRegister.gov API for identity verification, MFA, and GLBA Safeguards.")
 
     col_q, col_agency = st.columns([3, 1])
     with col_q:
@@ -159,7 +165,7 @@ with tab3:
             fed_res = search_regulations(fed_q, agency=agency_param)
             docs = fed_res.get("documents", [])
             st.success(f"Found {fed_res.get('total_results', len(docs))} regulatory documents.")
-            
+
             for doc in docs:
                 with st.container(border=True):
                     is_final = doc.get("is_final_rule", False)
@@ -168,4 +174,4 @@ with tab3:
                     st.markdown(f"{badge} • **Document #:** `{doc.get('document_number')}` • **Action:** {doc.get('action')}")
                     st.markdown(f"**Citation:** `{doc.get('citation')}` | **Effective Date:** `{doc.get('effective_on')}`")
                     st.markdown(f"> {doc.get('abstract')}")
-                    st.markdown(f"[🔗 View Official Publication on FederalRegister.gov]({doc.get('official_url')})")
+                    st.markdown(f"[View Official Publication on FederalRegister.gov]({doc.get('official_url')})")

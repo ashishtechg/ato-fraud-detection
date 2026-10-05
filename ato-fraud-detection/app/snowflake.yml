@@ -26,3 +26,6 @@ entities:
     execute_as: OWNER
     artifact_repositories:
       - SNOWFLAKE.SNOWPARK.PYPI_SHARED_REPOSITORY
+    sharing:
+      - role: ACCOUNTADMIN
+        with_grant_option: true

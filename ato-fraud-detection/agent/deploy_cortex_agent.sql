@@ -52,12 +52,16 @@ CREATE OR REPLACE AGENT ATO_FRAUD_DB.APP.ATO_FRAUD_AGENT
         - Be objective, precise, and transparent about model provenance.
 
     orchestration: |
-      Route every question using this matrix:
+      Route every question using this 3-channel matrix:
         1. For numerical data, counts, percentages, trends, risk scores, decision tiers,
            fraud rates, customer/device/login analytics → use ato_fraud_analyst (Cortex Analyst).
         2. For internal company policies, SOPs, lockout rules, MFA thresholds, investigation
            checklists, escalation paths → use internal_policy_search (Cortex Search).
-        3. If the question spans both channels, call both tools and synthesize.
+        3. For external Federal regulations, CFPB rules, FTC Safeguards, FFIEC guidance,
+           FinCEN AML/CDD, CISA CIRCIA, CFR citations, or proposed/final rules
+           → use search_federal_regulations to find documents, then get_federal_regulation
+           for full details on a specific document number.
+        4. If the question spans multiple channels, call the relevant tools and synthesize.
 
     sample_questions:
       - question: "How many BLOCK-tier fraud events occurred in the last 7 days?"
@@ -65,6 +69,8 @@ CREATE OR REPLACE AGENT ATO_FRAUD_DB.APP.ATO_FRAUD_AGENT
       - question: "What is our internal account lockout policy?"
       - question: "When is MFA mandated under our company policy?"
       - question: "Show me the top 10 highest-risk sessions with their sub-model scores."
+      - question: "What does the FTC Safeguards Rule require for MFA?"
+      - question: "What CFPB regulations address account takeover liability?"
 
   tools:
     - tool_spec:
@@ -90,9 +96,51 @@ CREATE OR REPLACE AGENT ATO_FRAUD_DB.APP.ATO_FRAUD_AGENT
         name: data_to_chart
         description: "Generate visualizations from fraud analytics data."
 
+    - tool_spec:
+        type: generic
+        name: search_federal_regulations
+        description: >
+          Search Federal Register documents for regulations related to authentication,
+          cybersecurity, identity verification, fraud, and financial services (FTC, CFPB,
+          FinCEN, FFIEC, CISA). Returns document titles, citations, agencies, and
+          whether each document is a binding final rule or proposed rule.
+        input_schema:
+          type: object
+          properties:
+            query:
+              type: string
+              description: "Search term (e.g. 'account takeover', 'multi-factor authentication', 'GLBA safeguards')"
+            agency:
+              type: string
+              description: "Optional agency slug filter (e.g. 'cfpb', 'ftc', 'fincen', 'cisa', 'occ')"
+            from_date:
+              type: string
+              description: "Optional minimum publication date in YYYY-MM-DD format"
+          required:
+            - query
+
+    - tool_spec:
+        type: generic
+        name: get_federal_regulation
+        description: >
+          Retrieve full details for a specific Federal Register document by its
+          document number. Returns title, abstract, agency, CFR references, citation,
+          effective date, and whether it is a binding final rule or proposed rule.
+        input_schema:
+          type: object
+          properties:
+            document_id:
+              type: string
+              description: "Federal Register document number (e.g. '2021-25736', '2022-17231')"
+          required:
+            - document_id
+
   tool_resources:
     ato_fraud_analyst:
       semantic_view: ATO_FRAUD_DB.SEMANTIC.ATO_FRAUD_ANALYTICS_SV
+      execution_environment:
+        type: warehouse
+        warehouse: COMPUTE_WH
 
     internal_policy_search:
       search_service: ATO_FRAUD_DB.SEMANTIC.ATO_POLICY_SEARCH
@@ -133,6 +181,20 @@ CREATE OR REPLACE AGENT ATO_FRAUD_DB.APP.ATO_FRAUD_AGENT
           type: "string"
           searchable: true
           filterable: false
+
+    search_federal_regulations:
+      identifier: ATO_FRAUD_DB.APP.SEARCH_FEDERAL_REGULATIONS
+      type: procedure
+      execution_environment:
+        type: warehouse
+        warehouse: COMPUTE_WH
+
+    get_federal_regulation:
+      identifier: ATO_FRAUD_DB.APP.GET_FEDERAL_REGULATION
+      type: procedure
+      execution_environment:
+        type: warehouse
+        warehouse: COMPUTE_WH
   $$;
 
 -- Verify the agent was created

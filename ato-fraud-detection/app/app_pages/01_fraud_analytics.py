@@ -110,26 +110,28 @@ with tech_col1:
     with st.container(border=True):
         st.markdown("#### Supervised XGBoost Classifier")
         st.markdown("Out-of-Time Temporal Holdout Evaluation (`>= 2026-09-10`)")
-        
-        m1, m2, m3, m4 = st.columns(4)
+
+        m1, m2 = st.columns(2)
         m1.metric("ROC-AUC", "0.8040", "Realistic")
         m2.metric("PR-AUC", "0.9493", "Cost-Sensitive")
-        m3.metric("Precision", "99.7%", "Ensemble")
-        m4.metric("Recall", "99.4%", "Ensemble")
-        
+        m3, m4 = st.columns(2)
+        m3.metric("Precision (Ensemble)", "99.7%")
+        m4.metric("Recall (Ensemble)", "99.4%")
+
         st.caption("Training: `scale_pos_weight=0.71`, `max_depth=6`, `n_estimators=150`. 19 features (leaky features removed). Noise injection + label noise enabled.")
 
 with tech_col2:
     with st.container(border=True):
         st.markdown("#### Unsupervised Anomaly Detection (Isolation Forest)")
         st.markdown("Trained strictly on clean human baseline logins to detect zero-day ATO")
-        
-        i1, i2, i3, i4 = st.columns(4)
+
+        i1, i2 = st.columns(2)
         i1.metric("ROC-AUC", "0.6149", "Novel Vectors")
         i2.metric("PR-AUC", "0.5944", "Imbalance-Safe")
+        i3, i4 = st.columns(2)
         i3.metric("Contamination", "0.02", "2% Expectation")
         i4.metric("Ring Members", "494", "Graph Clustered")
-        
+
         st.caption("Feature Vector: 8 behavioral biometrics (keystroke intervals, mouse entropy, dwell time, IP velocity). BEHAVIORAL_RISK_SCORE removed (leakage).")
 
 st.divider()
