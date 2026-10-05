@@ -218,25 +218,58 @@ ato-fraud-detection/
 
 | Component | Billing Model | Est. Monthly Usage | Credits/Mo | Est. Cost/Mo |
 |-----------|--------------|-------------------|------------|-------------|
-| **Cortex Agent** (orchestration) | Per-token (LLM inference) | ~200 queries/mo (~200K tokens) | ~2-4 | $6-12 |
-| **Cortex Analyst** (text-to-SQL) | Per-token | ~150 SQL generations/mo | ~1-2 | $3-6 |
-| **Cortex Search** | Per-token + indexing | ~100 searches/mo, daily refresh | ~0.5-1 | $1.50-3 |
-| **Warehouse compute** (query execution) | Per-second, per-warehouse | COMPUTE_WH (XS-S), ~30 min/mo | ~0.5-1 | $1.50-3 |
+| **Cortex Agent** (orchestration) | Per-token (LLM inference) | ~200 queries/mo | ~32 | $96 |
+| **Cortex Search** | Per-token + indexing | ~100 searches/mo, daily refresh | ~0.01 | $0.03 |
+| **Warehouse compute** (query execution) | Per-second, per-warehouse | COMPUTE_WH + ATO_FRAUD_WH | ~2-5 | $6-15 |
 | **Dynamic Tables** (incremental refresh) | Per-refresh compute | 5 DTs, 1-min lag | ~1-3 | $3-9 |
 | **Streamlit app** (SPCS Container Runtime) | Per-node-hour | 1 CPU node, ~50 hrs/mo | ~3-5 | $9-15 |
 | **MCP Server** | No idle cost | Per-request only | ~0.1 | $0.30 |
 | **Stored procedures** (Fed Register) | Warehouse compute | ~50 calls/mo, <1s each | ~0.05 | $0.15 |
-| **Storage** (all tables + stages) | Per-TB/month | ~2-5 GB | ~0.1 | $0.30 |
-| **Subtotal: Monthly Ongoing** | | | **~8-17** | **$25-50** |
+| **Storage** (all tables + stages) | Per-TB/month | ~4.2 GB | ~0.1 | $0.30 |
+| **Subtotal: Monthly Ongoing** | | | **~38-45** | **$115-136** |
+
+### Actual vs Estimated (Oct 2-5, 2026 — Build + Testing)
+
+Measured from `ACCOUNT_USAGE` views after building the full system and running 14 agent test queries.
+
+| Component | Actual Credits | Actual Cost | Original Estimate | Notes |
+|-----------|---------------|-------------|-------------------|-------|
+| **Warehouse: COMPUTE_WH** | 12.02 | $36.05 | — | Shared warehouse; includes Streamlit, CoCo, worksheets |
+| **Warehouse: ATO_FRAUD_WH** | 2.40 | $7.21 | ~$10 | Under estimate — data gen + feature pipelines |
+| **Warehouse: ATO_ML_WH** | 0.00 | $0.00 | ~$10 | ML training ran on COMPUTE_WH instead |
+| **Warehouse: ATO_SEARCH_WH** | 0.10 | $0.29 | ~$0.30 | On target |
+| **Cortex Agent** (14 queries) | 2.23 | $6.69 | — | **0.16 credits/query avg** (~$0.48/query) |
+| **Cortex Search** (43 hrs serving) | 0.000026 | $0.0001 | ~$0.30 | Negligible at small corpus size |
+| **Storage** (ATO_FRAUD_DB) | 4.2 GB | ~$0.10/mo | ~$0.30/mo | On target |
+| **Total Actual (build + test)** | **~16.75** | **~$50.24** | **~$27 (build)** | Includes COMPUTE_WH shared usage |
+
+### Key Findings from Actual Usage
+
+**Cortex Agent is the largest ongoing cost driver:**
+- Model auto-selected: `claude-opus-4-8` (premium tier)
+- Average **122K tokens per request** (semantic view schema + orchestration reasoning)
+- Average **0.16 credits per query** (~$0.48)
+- Projected: **200 queries/mo = ~32 credits ($96/mo)**
+
+**Cortex Search is essentially free at this scale:**
+- 22 policy chunks, 43 metering hours = 0.000026 credits total
+
+**Warehouse costs are predictable:**
+- ATO_FRAUD_WH (MEDIUM) used 2.4 credits for full data gen + pipeline build
+- Auto-suspend at 120s keeps idle costs near zero
+
+### Cost Optimization Options
+
+- **Pin a cheaper model**: Replace `orchestration: auto` with `orchestration: claude-sonnet-4-5` or `openai-gpt-5-mini` in the agent spec to reduce per-query token costs by 50-80%
+- **Set agent budgets**: Use `ALTER AGENT ... SET BUDGET` or per-user token quotas
+- **Monitor via**: `SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AGENT_USAGE_HISTORY` and `WAREHOUSE_METERING_HISTORY`
+- **Reduce warehouse size**: Downsize COMPUTE_WH to X-SMALL for lighter query workloads
 
 ### Cost Notes
 
-- **Token-based costs** (Agent, Analyst, Search) depend on query complexity and the orchestration model selected (auto-selects highest-quality available model, currently claude-opus-4-8).
-- **Warehouse costs** assume auto-suspend at 120s. Actual cost scales linearly with query volume.
-- **Trial accounts** have limited credits and don't support External Access Integrations (Federal Register procedures use embedded corpus fallback at zero additional cost).
-- **Production scaling**: for 10x query volume (~2,000 queries/mo), expect ~$150-300/mo. The main cost driver is LLM token consumption by the Cortex Agent orchestrator.
-- Monitor costs via `SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AGENT_USAGE_HISTORY` and warehouse metering views.
-- Set per-user budgets with `ALTER AGENT ... SET BUDGET` or account-level resource monitors.
+- All costs estimated at ~$3 per Snowflake credit (actual rate varies by contract and edition)
+- **Trial accounts** have limited credits and don't support External Access Integrations
+- **Production scaling**: at 2,000 queries/mo with `claude-opus-4-8`, expect ~$500-600/mo. Switching to `claude-sonnet-4-5` reduces this to ~$150-200/mo
 
 ## Prerequisites
 
